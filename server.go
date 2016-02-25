@@ -5,9 +5,26 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"regexp"
+	"strings"
 
 	"gopkg.in/redis.v3"
 )
+
+type StringSlice struct {
+	Strings []string
+}
+
+func (s *StringSlice) String() string {
+	return strings.Join(s.Strings, ",")
+}
+
+func (s *StringSlice) Set(str string) error {
+	s.Strings = append(s.Strings, str)
+	return nil
+}
 
 var (
 	fProject = flag.String("project", "site", "project to fetch from redis for")
@@ -22,10 +39,45 @@ var (
 	fTLSCert   = flag.String("tls-cert", "", "tls cert")
 )
 
+var fBackends StringSlice
+
+func init() {
+	flag.Var(&fBackends, "backend", "path:host to proxy to")
+}
+
+type Backend struct {
+	Pattern *regexp.Regexp
+	Host    string
+	Proxy   *httputil.ReverseProxy
+}
+
 type LightningHandler struct {
 	r              *redis.Client
 	project        string
 	currentContent string
+	backends       []*Backend
+}
+
+func (l *LightningHandler) AddBackend(str string) {
+	idx := strings.IndexByte(str, ':')
+	if idx == -1 {
+		panic("bad format")
+	}
+
+	host := str[idx+1:]
+
+	u, err := url.Parse("http://" + host)
+	if err != nil {
+		panic(err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(u)
+
+	reg := regexp.MustCompile("^" + str[:idx])
+
+	fmt.Printf("Proxying '%s' to '%s'\n", str[:idx], host)
+
+	l.backends = append(l.backends, &Backend{reg, host, proxy})
 }
 
 func (l *LightningHandler) Connect(addr, pass string, db int) error {
@@ -45,6 +97,13 @@ func (l *LightningHandler) SetProject(proj string) {
 }
 
 func (l *LightningHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	for _, backend := range l.backends {
+		if backend.Pattern.MatchString(req.URL.Path) {
+			backend.Proxy.ServeHTTP(res, req)
+			return
+		}
+	}
+
 	currentContent := l.currentContent
 
 	index := req.URL.Query().Get("index_key")
@@ -66,6 +125,10 @@ func main() {
 	flag.Parse()
 
 	var handler LightningHandler
+
+	for _, backend := range fBackends.Strings {
+		handler.AddBackend(backend)
+	}
 
 	handler.SetProject(*fProject)
 
