@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/Sirupsen/logrus"
 
 	"gopkg.in/redis.v3"
 )
@@ -97,12 +100,26 @@ func (l *LightningHandler) SetProject(proj string) {
 }
 
 func (l *LightningHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	fields := logrus.Fields{
+		"remote_addr": req.RemoteAddr,
+		"host":        req.Host,
+		"method":      req.Method,
+		"uri":         req.RequestURI,
+	}
+
 	for _, backend := range l.backends {
 		if backend.Pattern.MatchString(req.URL.Path) {
+			fields["proxy_to"] = backend.Host
+
+			start := time.Now()
 			backend.Proxy.ServeHTTP(res, req)
+			fields["elapse"] = time.Since(start)
+			logrus.WithFields(fields).Info("finished proxy request")
 			return
 		}
 	}
+
+	start := time.Now()
 
 	currentContent := l.currentContent
 
@@ -119,6 +136,9 @@ func (l *LightningHandler) ServeHTTP(res http.ResponseWriter, req *http.Request)
 
 	res.Header().Add("Content-Type", "text/html")
 	res.Write([]byte(str))
+
+	fields["elapse"] = time.Since(start)
+	logrus.WithFields(fields).Info("finished request")
 }
 
 func main() {
